@@ -12,4 +12,4 @@ else
     cp avtty "$HOME/.local/bin/avtty"
 fi
 
-echo "[+] AVTTY installed. Type 'avtty <filename>'"
+echo "[+] AVTTY installed. Type 'avtty --help for more'"
