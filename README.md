@@ -4,9 +4,9 @@
 
 AVTTY is a small Unix terminal text editor written in C.
 
-The project is focused on keeping the source as small as theoretically possible while still functioning as a basic text editor.
+The project is focused on keeping the source small and minimal while not compromising on any feature of a standard text editor
 
-The entire editor is **6 lines** and **620 bytes**
+The entire editor is **800 lines** and **620 bytes**
 
 It is aimed at Unix users, C programmers, and people who prefer minimal software. Its small footprint makes it suitable for minimal systems.
 
@@ -21,12 +21,8 @@ chmod +x install.sh
 
 ## Usage
 
-Open an existing file:
+For help use
 
 ```sh
-avtty <filename>
+avtty --help
 ```
-
-**Ctrl-S** saves the file.
-
-**Ctrl-Q** quits AVTTY.
