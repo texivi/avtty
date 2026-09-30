@@ -545,7 +545,7 @@ static void draw(void)
             putchar('\n');
     }
 
-    printf("\033[%zu;1H", size.ws_row);
+    printf("\033[%hu;1H", size.ws_row);
     status("Ctrl-S save  Ctrl-Q quit  Ctrl-F find  Ctrl-G goto  Ctrl-Z undo  Ctrl-Y redo",
            width);
 
