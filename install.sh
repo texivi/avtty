@@ -1,15 +1,17 @@
 #!/bin/sh
+set -e
 
-cc avtty.c -o avtty || exit 1
-chmod +x avtty
+cc -O2 avtty.c -o avtty
 
 if [ -w /usr/local/bin ]; then
-    cp avtty /usr/local/bin/avtty
+    install -m 755 avtty /usr/local/bin/avtty
 elif command -v sudo >/dev/null 2>&1; then
-    sudo cp avtty /usr/local/bin/avtty
+    sudo install -m 755 avtty /usr/local/bin/avtty
 else
     mkdir -p "$HOME/.local/bin"
-    cp avtty "$HOME/.local/bin/avtty"
+    install -m 755 avtty "$HOME/.local/bin/avtty"
 fi
 
-echo "[+] AVTTY installed. Type 'avtty --help for more'"
+rm -f avtty
+
+echo "[+] AVTTY installed. Run 'avtty -h' for help."
