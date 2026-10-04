@@ -4,7 +4,7 @@
 
 *A Very Tiny Text Yard*
 
-AVTTY is a small Unix terminal text editor written in C.
+AVTTY is a radical and experimental small Unix text editor written in C.
 
 The project is focused on keeping the source small and minimal while not compromising on any feature of a standard text editor
 
