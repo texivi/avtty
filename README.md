@@ -6,7 +6,7 @@
 
 AVTTY is a radical and experimental small Unix text editor written in C.
 
-It is part of the [texivi software suite](texivi/avtty/tss.md)
+It is part of the [texivi software suite](tss.md)
 
 The project is focused on keeping the source small and minimal while not compromising on **any** feature of a standard text editor
 
