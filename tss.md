@@ -6,11 +6,11 @@ The **Texivi Software Suite (TSS)** is a collection of small Unix utilities buil
 
 ## Core Rules
 
- **Single File:** Every tool in the suite is built as a single code file.
- **Small and Simple:** Programs are kept small by removing extra features and keeping only what is necessary.
- **One Purpose:** Each tool is built to handle one specific task.
- **Work Together:** Every program easily integrates with standard command-line tools and shell scripts.
- **Low Resource Use:** Designed to run fast and use minimal memory.
+* **Single File:** Every tool in the suite is built as a single code file.
+* **Small and Simple:** Programs are kept small by removing extra features and keeping only what is necessary.
+* **One Purpose:** Each tool is built to handle one specific task.
+* **Work Together:** Every program easily integrates with standard command-line tools and shell scripts.
+* **Low Resource Use:** Designed to run fast and use minimal memory.
 
 ---
 
