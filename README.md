@@ -1,3 +1,5 @@
+![Logo](Logo.png)
+
 # AVTTY
 
 *A Very Tiny Text Yard*
