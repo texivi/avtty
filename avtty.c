@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <glob.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -12,26 +14,21 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION "0.3.0"
+#define VERSION "0.4.0"
 #define TABW 4
 #define CTRL_(k) ((k) & 0x1f)
 #define ESC 27
+#define ALT(c) (2000 + (c))
 #define CONT(b) ((((unsigned char)(b)) & 0xC0) == 0x80)
-#define RECENT_MAX 8
-#define ITEM_W 24
-#define NITEMS 7
+#define MAXREC 8
 #define HINT "Ctrl: S save | Q quit | Z undo | Y redo | F find | R replace | G goto | K cut"
 
-#define C1 "18;34;156"
-#define C2 "35;61;255"
-#define C3 "93;182;250"
-#define C4 "202;232;255"
-#define C5 "245;246;251"
 #define SGR(s) "\x1b[" s "m"
-#define FG(c) SGR("38;2;" c)
 #define RESET SGR("0")
-#define SEL SGR("1;48;2;" C2 ";38;2;" C5)
-#define BAR SGR("1;48;2;" C1 ";38;2;" C5)
+#define GRAY SGR("38;5;244")
+#define TXT SGR("38;5;252")
+#define TITLE SGR("1;38;5;117")
+#define SEL SGR("1;48;5;238;38;5;117")
 
 enum Key {
     BACKSPACE = 127,
@@ -47,36 +44,37 @@ struct abuf { char *b; int len, cap; };
 static struct {
     int cx, cy, rx, want, rowoff, coloff, srows, scols, rows;
     Row *row; int nrows, caprows;
-    char *filename;
-    int crlf, nums;
+    char *filename, *clip, *lastq;
+    int nums, lang, promptcol;
     char msg[160]; time_t msgtime;
-    int promptcol;
     Op *ops; int nops, capops, cur, saved, group;
-    int dash, page, sel, rsel, twocol, lang;
-    char *recent[RECENT_MAX]; int nrecent;
+    int dash, page, sel, rsel, twocol;
+    char *recent[MAXREC]; int nrecent;
     struct termios orig; int raw;
 } E;
 
-static int last_typing = 0, prompt_empty_ok = 0;
+static int last_typing, prompt_empty_ok, prompt_paths, find_x, find_y;
 static const char *prompt_note = "";
 
-static const struct { const char *label; char key; } items[NITEMS] = {
-    { "Open File", 'o' }, { "New File", 'n' }, { "Create File", 'c' }, { "Recent Files", 'r' },
-    { "Keys & Help", 'h' }, { "Line Numbers", 'l' }, { "Quit", 'q' }
+static const struct { const char *label; char key; } items[6] = {
+    { "Open File", 'o' }, { "New File", 'n' }, { "Create File", 'c' },
+    { "Recent Files", 'r' }, { "Keys & Help", 'h' }, { "Quit", 'q' }
 };
 
-static const char *help[] = {
-    "Ctrl-S    save", "Ctrl-Q    quit", "Ctrl-Z    undo", "Ctrl-Y    redo",
-    "Ctrl-F    find", "Ctrl-R    replace all", "Ctrl-G    go to line", "Ctrl-K    cut line",
-    "Ctrl-N    line numbers", "Ctrl-A/E  line start/end", "Ctrl+Arrows  by word"
+static const char *const help[] = {
+    "Ctrl-S   save", "Ctrl-Q   quit", "Ctrl-Z   undo", "Ctrl-Y   redo",
+    "Ctrl-F   find", "Alt-N/P  next/prev match", "Ctrl-R   replace all", "Ctrl-G   go to line",
+    "Ctrl-K   cut line", "Ctrl-U   paste line", "Ctrl-D   duplicate line", "Ctrl-W   delete word",
+    "Ctrl-B   match bracket", "Ctrl-N   line numbers", "Ctrl-O   open file", "Ctrl-A/E  line start/end"
 };
+#define NHELP ((int)(sizeof help / sizeof *help))
 
 static void out(const char *s) { (void)!write(STDOUT_FILENO, s, strlen(s)); }
 
 static void disable_raw(void) {
     if (!E.raw) return;
     E.raw = 0;
-    out("\x1b[0m\x1b[?1049l");
+    out(RESET "\x1b[?1049l");
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig);
 }
 
@@ -117,45 +115,26 @@ static void get_size(void) {
 }
 
 static int read_key(void) {
-    char c, q[5];
+    static const struct { const char *s; int k; } esc[] = {
+        { "[A", ARROW_UP }, { "[B", ARROW_DOWN }, { "[C", ARROW_RIGHT }, { "[D", ARROW_LEFT },
+        { "[H", HOME_KEY }, { "[F", END_KEY }, { "OH", HOME_KEY }, { "OF", END_KEY },
+        { "[1~", HOME_KEY }, { "[7~", HOME_KEY }, { "[4~", END_KEY }, { "[8~", END_KEY },
+        { "[3~", DEL_KEY }, { "[5~", PAGE_UP }, { "[6~", PAGE_DOWN },
+        { "[1;5C", WORD_RIGHT }, { "[1;5D", WORD_LEFT }, { "[1;3C", WORD_RIGHT }, { "[1;3D", WORD_LEFT }
+    };
+    char c, q[8] = "";
     ssize_t n = read(STDIN_FILENO, &c, 1);
-    if (n == 0) return 0;
-    if (n < 0) {
-        if (errno == EAGAIN || errno == EINTR) return 0;
-        die("read");
+    if (n <= 0) {
+        if (n < 0 && errno != EAGAIN && errno != EINTR) die("read");
+        return 0;
     }
     if (c != ESC) return (unsigned char)c;
-    if (read(STDIN_FILENO, &q[0], 1) != 1 || read(STDIN_FILENO, &q[1], 1) != 1) return ESC;
-    if (q[0] == '[') {
-        if (q[1] >= '0' && q[1] <= '9') {
-            if (read(STDIN_FILENO, &q[2], 1) != 1) return ESC;
-            if (q[2] == '~') {
-                switch (q[1]) {
-                    case '1': case '7': return HOME_KEY;
-                    case '3': return DEL_KEY;
-                    case '4': case '8': return END_KEY;
-                    case '5': return PAGE_UP;
-                    case '6': return PAGE_DOWN;
-                }
-            } else if (q[2] == ';') {
-                if (read(STDIN_FILENO, &q[3], 1) != 1 || read(STDIN_FILENO, &q[4], 1) != 1) return ESC;
-                if (q[4] == 'C') return WORD_RIGHT;
-                if (q[4] == 'D') return WORD_LEFT;
-            }
-        } else {
-            switch (q[1]) {
-                case 'A': return ARROW_UP;
-                case 'B': return ARROW_DOWN;
-                case 'C': return ARROW_RIGHT;
-                case 'D': return ARROW_LEFT;
-                case 'H': return HOME_KEY;
-                case 'F': return END_KEY;
-            }
-        }
-    } else if (q[0] == 'O') {
-        if (q[1] == 'H') return HOME_KEY;
-        if (q[1] == 'F') return END_KEY;
-    }
+    if (read(STDIN_FILENO, q, 1) != 1) return ESC;
+    if (q[0] != '[' && q[0] != 'O') return ALT((unsigned char)q[0]);
+    for (int i = 1; i < 7 && read(STDIN_FILENO, q + i, 1) == 1; i++)
+        if (isalpha((unsigned char)q[i]) || q[i] == '~') break;
+    for (size_t i = 0; i < sizeof esc / sizeof *esc; i++)
+        if (!strcmp(q, esc[i].s)) return esc[i].k;
     return ESC;
 }
 
@@ -301,24 +280,30 @@ static int rx_to_cx(const Row *r, int rx) {
     return i;
 }
 
+#define C2 "35;61;255"
+#define C3 "93;182;250"
+#define C4 "202;232;255"
+#define C5 "245;246;251"
+
 static const char *const kw[] = {
     "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return",
     "goto", "sizeof", "typedef", "struct", "union", "enum", "static", "const", "extern", "volatile",
-    "inline", "class", "public", "private", "protected", "new", "delete", "this", "try", "catch",
-    "throw", "import", "from", "as", "def", "lambda", "pass", "with", "yield", "None", "True", "False",
+    "inline", "class", "public", "private", "new", "delete", "this", "try", "catch", "throw",
+    "import", "from", "as", "def", "lambda", "pass", "with", "yield", "None", "True", "False",
     "null", "true", "false", "NULL", "function", "var", "let", "fn", "pub", "use", "impl", "match",
-    "loop", "mut", "self", "async", "await", "package", "interface", "func", "defer", "then", "fi",
-    "elif", "done", "in", "is", "not", "and", "or", "export", "local", NULL
+    "self", "async", "await", "package", "func", "defer", "then", "fi", "elif", "done", "in", "is",
+    "not", "and", "or", "export", "local", NULL
 };
 
 static const char *const ty[] = {
-    "int", "char", "void", "long", "short", "float", "double", "bool", "unsigned", "signed", "size_t",
-    "ssize_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "int8_t", "int16_t", "int32_t",
-    "int64_t", "FILE", "string", "str", "i32", "u32", "i64", "u64", "u8", "usize", "f32", "f64", NULL
+    "int", "char", "void", "long", "short", "float", "double", "bool", "unsigned", "signed",
+    "size_t", "ssize_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "int8_t", "int16_t",
+    "int32_t", "int64_t", "FILE", "string", "str", "i32", "u32", "i64", "u64", "u8", "usize", NULL
 };
 
 static const char *const hlc[] = {
-    RESET, SGR("3;38;2;" C2), SGR("1;38;2;" C3), FG(C4), SGR("1;38;2;" C5), SGR("1;38;2;" C2), FG(C3)
+    RESET, SGR("3;38;2;" C2), SGR("1;38;2;" C3), SGR("38;2;" C4),
+    SGR("1;38;2;" C5), SGR("1;38;2;" C2), SGR("38;2;" C3)
 };
 
 static int has(const char *const *l, const char *w, size_t n) {
@@ -401,24 +386,22 @@ static void draw_row(struct abuf *ab, const Row *r, int width, const char *cls) 
     if (cur) ab_s(ab, RESET);
 }
 
-static void fit_tail(char *dst, size_t n, const char *s, int maxw) {
-    int skip = utf8w(s) - maxw;
-    if (maxw < 1) { dst[0] = 0; return; }
-    if (skip <= 0) { snprintf(dst, n, "%s", s); return; }
-    for (skip++; *s && skip > 0; skip--) { s++; while (CONT(*s)) s++; }
-    snprintf(dst, n, "…%s", s);
+static void ctr(struct abuf *ab, int r, int w, const char *style, const char *s) {
+    put(ab, r, 1 + (w - utf8w(s)) / 2, style, s);
+    ab_s(ab, RESET);
 }
 
-static const char *const bigl[6] = {
-    " █████╗ " "██╗   ██╗" "████████╗" "████████╗" "██╗   ██╗",
-    "██╔══██╗" "██║   ██║" "╚══██╔══╝" "╚══██╔══╝" "╚██╗ ██╔╝",
-    "███████║" "██║   ██║" "   ██║   " "   ██║   " " ╚████╔╝ ",
-    "██╔══██║" "╚██╗ ██╔╝" "   ██║   " "   ██║   " "  ╚██╔╝  ",
-    "██║  ██║" " ╚████╔╝ " "   ██║   " "   ██║   " "   ██║   ",
-    "╚═╝  ╚═╝" "  ╚═══╝  " "   ╚═╝   " "   ╚═╝   " "   ╚═╝   "
-};
+static void item(struct abuf *ab, int r, int c, int i) {
+    char t[48];
+    int s = i == E.sel;
+    snprintf(t, sizeof t, "%s%-19s", s ? " ▸ " : "   ", items[i].label);
+    put(ab, r, c, s ? SEL : TXT, t);
+    snprintf(t, sizeof t, "%c ", items[i].key);
+    put(ab, r, c + 22, s ? SEL : GRAY, t);
+    ab_s(ab, RESET);
+}
 
-static void compact_row(char *b, int r) {
+static void logo_row(struct abuf *ab, int r, int sc) {
     static const char *const g[5][5] = {
         { " ### ", "#   #", "#####", "#   #", "#   #" },
         { "#   #", "#   #", "#   #", " # # ", "  #  " },
@@ -426,127 +409,71 @@ static void compact_row(char *b, int r) {
         { "#####", "  #  ", "  #  ", "  #  ", "  #  " },
         { "#   #", " # # ", "  #  ", "  #  ", "  #  " }
     };
-    b[0] = 0;
-    for (int x = 0; x < 29; x++) {
-        int l = x / 6, p = x % 6;
-        strcat(b, p < 5 && r < 5 && g[l][r][p] == '#' ? "█" : p < 5 && r > 0 && g[l][r - 1][p] == '#' ? "▒" : " ");
-    }
-}
-
-static void paint(struct abuf *ab, const char *s, int y, int w) {
-    static const int pal[5][3] = { { 245, 246, 251 }, { 202, 232, 255 }, { 93, 182, 250 }, { 35, 61, 255 }, { 18, 34, 156 } };
-    int x = 0, last = -1;
-    for (; *s; x++) {
-        int l = 1;
-        while (CONT(s[l])) l++;
-        if (*s != ' ') {
-            int p = (x * 60 / w + y * 8) * 82 / 100 * 4, i = p / 100 > 3 ? 3 : p / 100, f = p - i * 100, c[3];
-            int face = l == 3 && !memcmp(s, "█", 3);
-            for (int k = 0; k < 3; k++) {
-                c[k] = pal[i][k] + (pal[i + 1][k] - pal[i][k]) * f / 100;
-                if (!face) c[k] = c[k] * 55 / 100;
-            }
-            if ((c[0] << 16 | c[1] << 8 | c[2]) != last) {
-                char b[40];
-                last = c[0] << 16 | c[1] << 8 | c[2];
-                snprintf(b, sizeof b, "\x1b[38;2;%d;%d;%dm", c[0], c[1], c[2]);
-                ab_s(ab, b);
-            }
-            ab_append(ab, s, l);
-        } else ab_s(ab, " ");
-        s += l;
+    static const char *const col[5] = {
+        SGR("38;5;117"), SGR("38;5;111"), SGR("38;5;105"), SGR("38;5;99"), SGR("38;5;93")
+    };
+    ab_s(ab, col[r]);
+    for (int l = 0; l < 5; l++) {
+        for (int p = 0; p < 5; p++) ab_rep(ab, g[l][r][p] == '#' ? "█" : " ", sc);
+        if (l < 4) ab_rep(ab, " ", sc);
     }
     ab_s(ab, RESET);
-}
-
-static void ctr(struct abuf *ab, int r, int x0, int iw, const char *style, const char *s) {
-    put(ab, r, x0 + (iw - utf8w(s)) / 2, style, s);
-    ab_s(ab, RESET);
-}
-
-static void item(struct abuf *ab, int r, int c, int i) {
-    char t[48], k[4];
-    int s = i == E.sel;
-    snprintf(t, sizeof t, "%s%-19s", s ? " ▸ " : "   ",
-             i == 5 ? (E.nums ? "Line Numbers: on" : "Line Numbers: off") : items[i].label);
-    snprintf(k, sizeof k, "%c ", items[i].key);
-    put(ab, r, c, s ? SEL : RESET, t);
-    put(ab, r, c + 22, s ? SEL : FG(C3), k);
-    ab_s(ab, RESET);
-}
-
-static void hline(char *b, const char *l, const char *r, int n) {
-    strcpy(b, l);
-    while (n-- > 0) strcat(b, "─");
-    strcat(b, r);
 }
 
 static void dash_draw(struct abuf *ab) {
     int cols = E.scols, avail = E.srows - 1;
     for (int y = 1; y <= avail; y++) { at(ab, y, 1); ab_s(ab, "\x1b[K"); }
-    if (cols < 40 || avail < 6) { put(ab, 1, 1, RESET, "avtty: terminal too small"); return; }
+    if (cols < 40 || avail < 8) { put(ab, 1, 1, RESET, "avtty: terminal too small"); return; }
 
-    int big = cols >= 56, lw = big ? 44 : 29;
-    E.twocol = cols >= 62;
-    int mr = E.twocol ? 4 : NITEMS, mw = E.twocol ? 2 * ITEM_W + 4 : ITEM_W;
-    int iw = (lw > mw ? lw : mw) + 8, left = (cols - iw - 2) / 2 + 1, x0 = left + 1;
-    int logo = E.page == 0 && avail >= mr + 14;
-    int cnt = E.page == 0 ? mr : E.page == 1 ? (E.nrecent ? E.nrecent : 1) : (int)(sizeof help / sizeof *help);
-    int n = E.page == 0 ? (logo ? 9 : 1) + cnt + 3 : cnt + 6;
-    int top = (avail - n - 2) / 2 + 1, r;
-    if (top < 1) top = 1;
+    int sc = cols >= 64 ? 2 : 1, lw = 29 * sc, per = cols >= 62 ? 2 : 1, mr = 6 / per;
+    E.twocol = per == 2;
+    int logo = E.page == 0 && avail - 2 >= mr + 9;
+    int cnt = E.page == 0 ? mr : E.page == 1 ? (E.nrecent ? E.nrecent : 1) : (NHELP + per - 1) / per;
+    int n = E.page == 0 ? (logo ? 6 : 0) + cnt + 2 : cnt + 4;
+    int top = 2 + (avail - 2 - n) / 2, r = top;
 
-    char ln[512];
-    hline(ln, "╭", "╮", iw);
-    put(ab, top, left, FG(C1), ln);
-    for (int i = 1; i <= n; i++) {
-        put(ab, top + i, left, FG(C1), "│");
-        put(ab, top + i, left + iw + 1, FG(C1), "│");
-    }
-    hline(ln, "╰", "╯", iw);
-    put(ab, top + n + 1, left, FG(C1), ln);
-    ab_s(ab, RESET);
+    put(ab, 1, 1, GRAY, "AVTTY(1)");
+    put(ab, 1, cols - 7, GRAY, "AVTTY(1)");
+    ctr(ab, 1, cols, TXT, "A very tiny text yard");
+    ctr(ab, avail, cols, GRAY, "Part of the Texivi Software Suite (TSS)");
 
     if (E.page == 0) {
-        r = top + 2;
         if (logo) {
-            for (int k = 0; k < 6; k++) {
-                char b[128];
-                at(ab, r + k, x0 + (iw - lw) / 2);
-                paint(ab, big ? bigl[k] : (compact_row(b, k), b), k, lw);
-            }
-            r += 8;
+            for (int k = 0; k < 5; k++) { at(ab, r + k, 1 + (cols - lw) / 2); logo_row(ab, k, sc); }
+            r += 6;
         }
+        int mx = 1 + (cols - (per == 2 ? 52 : 24)) / 2;
         for (int k = 0; k < mr; k++) {
-            item(ab, r + k, x0 + (iw - mw) / 2, k);
-            if (E.twocol && k + 4 < NITEMS) item(ab, r + k, x0 + (iw - mw) / 2 + ITEM_W + 4, k + 4);
+            item(ab, r + k, mx, k);
+            if (per == 2) item(ab, r + k, mx + 28, k + 3);
         }
-        ctr(ab, r + mr + 1, x0, iw, FG(C2), "avtty " VERSION " • ↑↓←→ Enter");
+        ctr(ab, r + mr + 1, cols, GRAY, "avtty " VERSION " • ↑↓←→ move • Enter select");
         return;
     }
 
-    ctr(ab, top + 2, x0, iw, SGR("1;38;2;" C4), E.page == 1 ? "Recent Files" : "Keys");
-    r = top + 4;
+    ctr(ab, top, cols, TITLE, E.page == 1 ? "Recent Files" : "Keys");
+    r = top + 2;
     if (E.page == 2) {
-        for (int i = 0; i < cnt; i++) put(ab, r + i, x0 + (iw - 24) / 2, RESET, help[i]);
-        ctr(ab, r + cnt + 1, x0, iw, FG(C2), "Press any key to go back");
+        for (int i = 0; i < NHELP; i++) put(ab, r + i / per, 1 + (cols - 28 * per) / 2 + i % per * 28, TXT, help[i]);
+        ab_s(ab, RESET);
+        ctr(ab, r + cnt + 1, cols, GRAY, "Press any key to go back");
         return;
     }
-    if (!E.nrecent) ctr(ab, r, x0, iw, FG(C2), "Nothing here yet");
+    if (!E.nrecent) ctr(ab, r, cols, GRAY, "Nothing here yet");
+    int cw = cols < 60 ? cols - 4 : 56;
     for (int i = 0; i < E.nrecent; i++) {
-        char t[PATH_MAX + 8], s[PATH_MAX + 16], l[PATH_MAX + 32];
+        char t[PATH_MAX + 8], l[PATH_MAX + 32];
         const char *p = E.recent[i], *h = getenv("HOME");
         size_t hl = h ? strlen(h) : 0;
-        int sel = i == E.rsel, cw = iw - 8;
+        int sel = i == E.rsel;
         if (hl && !strncmp(p, h, hl) && (!p[hl] || p[hl] == '/')) snprintf(t, sizeof t, "~%s", p + hl);
         else snprintf(t, sizeof t, "%s", p);
-        fit_tail(s, sizeof s, t, cw - 3);
-        snprintf(l, sizeof l, "%s%s", sel ? " ▸ " : "   ", s);
-        put(ab, r + i, x0 + 4, sel ? SEL : RESET, l);
-        ab_rep(ab, " ", cw - 3 - utf8w(s));
+        snprintf(l, sizeof l, "%s%.*s", sel ? " ▸ " : "   ", cw - 3, t);
+        put(ab, r + i, 1 + (cols - cw) / 2, sel ? SEL : TXT, l);
+        ab_rep(ab, " ", cw - utf8w(l));
         ab_s(ab, RESET);
     }
-    ctr(ab, r + cnt + 1, x0, iw, FG(C2), "Enter or 1-8 open • Esc back");
+    ctr(ab, r + cnt + 1, cols, GRAY, "Enter or 1-8 open • Esc back");
 }
 
 static void refresh_screen(void) {
@@ -562,26 +489,25 @@ static void refresh_screen(void) {
             gw = (gw < 3 ? 3 : gw) + 1;
             if (E.scols <= gw + 8) gw = 0;
         }
-        int textw = E.scols - gw > 0 ? E.scols - gw : 1;
+        int textw = E.scols - gw > 0 ? E.scols - gw : 1, blk = 0;
         if (E.cy < E.rowoff) E.rowoff = E.cy;
         if (E.cy >= E.rowoff + E.rows) E.rowoff = E.cy - E.rows + 1;
         E.rx = cx_to_rx(&E.row[E.cy], E.cx);
         if (E.rx < E.coloff) E.coloff = E.rx;
         if (E.rx >= E.coloff + textw) E.coloff = E.rx - textw + 1;
-
-        int blk = 0;
         if (E.lang) for (int i = 0; i < E.rowoff && i < E.nrows; i++) hl(&E.row[i], &blk);
+
         for (int y = 0; y < E.rows; y++) {
             int fr = E.rowoff + y;
             at(&ab, y + 1, 1);
             if (fr < E.nrows) {
                 if (gw) {
                     char num[96];
-                    snprintf(num, sizeof num, FG(C2) "%*d " RESET, gw - 1, fr + 1);
+                    snprintf(num, sizeof num, GRAY "%*d " RESET, gw - 1, fr + 1);
                     ab_s(&ab, num);
                 }
                 draw_row(&ab, &E.row[fr], textw, hl(&E.row[fr], &blk));
-            } else ab_s(&ab, FG(C1) "~" RESET);
+            } else ab_s(&ab, GRAY "~" RESET);
             ab_s(&ab, "\x1b[K");
         }
 
@@ -591,7 +517,7 @@ static void refresh_screen(void) {
         int rn = snprintf(right, sizeof right, "Ln %d/%d, Col %d ", E.cy + 1, E.nrows, E.rx + 1);
         if (ln > E.scols) ln = E.scols;
         at(&ab, E.rows + 1, 1);
-        ab_s(&ab, BAR);
+        ab_s(&ab, "\x1b[7m");
         ab_append(&ab, left, ln);
         for (; ln < E.scols; ln++) {
             if (E.scols - ln == rn) { ab_append(&ab, right, rn); break; }
@@ -618,10 +544,9 @@ static void refresh_screen(void) {
 }
 
 static int recent_path(char *o, size_t n) {
-    const char *s = getenv("XDG_STATE_HOME"), *h = getenv("HOME");
-    if (s && *s) snprintf(o, n, "%s/avtty/recent", s);
-    else if (h && *h) snprintf(o, n, "%s/.local/state/avtty/recent", h);
-    else return -1;
+    const char *h = getenv("HOME");
+    if (!h || !*h) return -1;
+    snprintf(o, n, "%s/.avtty_recent", h);
     return 0;
 }
 
@@ -643,114 +568,114 @@ static int recent_read(char **o, int max) {
 }
 
 static void recent_add(const char *path) {
-    char *real = realpath(path, NULL), *old[RECENT_MAX], p[PATH_MAX];
+    char *real = realpath(path, NULL), *old[MAXREC], p[PATH_MAX];
     if (!real) return;
-    int n = recent_read(old, RECENT_MAX);
-    if (recent_path(p, sizeof p) == 0) {
-        for (char *s = p + 1; *s; s++)
-            if (*s == '/') { *s = 0; mkdir(p, 0755); *s = '/'; }
-        FILE *f = fopen(p, "w");
-        if (f) {
-            fprintf(f, "%s\n", real);
-            for (int i = 0, w = 1; i < n && w < RECENT_MAX; i++)
-                if (strcmp(old[i], real)) { fprintf(f, "%s\n", old[i]); w++; }
-            fclose(f);
-        }
+    int n = recent_read(old, MAXREC);
+    FILE *f = recent_path(p, sizeof p) ? NULL : fopen(p, "w");
+    if (f) {
+        fprintf(f, "%s\n", real);
+        for (int i = 0, w = 1; i < n && w < MAXREC; i++)
+            if (strcmp(old[i], real)) { fprintf(f, "%s\n", old[i]); w++; }
+        fclose(f);
     }
     for (int i = 0; i < n; i++) free(old[i]);
     free(real);
 }
 
-static int load_file(const char *fn) {
-    FILE *f = fopen(fn, "rb");
+static void load_stream(FILE *f) {
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
-    if (!f) return -1;
     while ((n = getline(&line, &cap, f)) != -1) {
-        if (n > 0 && line[n - 1] == '\n') {
-            n--;
-            if (n > 0 && line[n - 1] == '\r') { n--; if (!E.nrows) E.crlf = 1; }
-        }
+        if (n > 0 && line[n - 1] == '\n') n--;
         insert_row(E.nrows, line, (int)n);
     }
     free(line);
-    int err = ferror(f);
-    fclose(f);
-    if (!E.nrows) insert_row(0, "", 0);
-    return err ? -1 : 0;
 }
 
 static int open_file_cmd(const char *file, int mode, char *err, size_t en) {
     struct stat st;
     int exists = stat(file, &st) == 0;
+    FILE *f = NULL;
     if (exists && S_ISDIR(st.st_mode)) { snprintf(err, en, "'%s' is a directory", file); return -1; }
-    if (mode == 2) {
-        if (exists) { snprintf(err, en, "'%s' already exists (use -o to open it)", file); return -1; }
-        FILE *f = fopen(file, "wx");
-        if (!f) { snprintf(err, en, "can't create '%s': %s", file, strerror(errno)); return -1; }
-        fclose(f);
-        exists = 1;
-    } else if (mode == 1 && !exists) {
-        snprintf(err, en, "'%s' does not exist (use -c to create it)", file);
-        return -1;
+    if (mode == 2 && exists) { snprintf(err, en, "'%s' already exists (use -o to open it)", file); return -1; }
+    if (mode == 1 && !exists) { snprintf(err, en, "'%s' does not exist (use -c to create it)", file); return -1; }
+    if (mode == 2 || exists) {
+        f = fopen(file, mode == 2 ? "wx" : "rb");
+        if (!f) { snprintf(err, en, "can't %s '%s': %s", mode == 2 ? "create" : "read", file, strerror(errno)); return -1; }
     }
     free_rows();
-    E.crlf = 0;
-    if (!exists) insert_row(0, "", 0);
-    else if (load_file(file) == -1) {
-        snprintf(err, en, "can't read '%s': %s", file, strerror(errno));
-        free_rows();
-        return -1;
-    }
+    if (exists) load_stream(f);
+    if (f) fclose(f);
+    if (!E.nrows) insert_row(0, "", 0);
     free(E.filename);
     E.filename = strdup(file);
     detect_lang();
     E.cx = E.cy = E.rowoff = E.coloff = E.nops = E.cur = E.saved = E.dash = 0;
-    if (exists) { recent_add(file); set_msg(HINT); }
+    if (f) { recent_add(file); set_msg(HINT); }
     else set_msg("New file: %s  (Ctrl-S to save)", file);
     return 0;
 }
 
 static char *prompt(const char *label, void (*cb)(const char *, int));
 
+static char *ask_path(const char *label) {
+    prompt_paths = 1;
+    char *p = prompt(label, NULL);
+    prompt_paths = 0;
+    return p;
+}
+
 static int save_file(void) {
     if (!E.filename) {
-        char *n = prompt("Save as (Esc to cancel): ", NULL);
+        char *n = ask_path("Save as (Esc to cancel): ");
         if (!n) { set_msg("Save cancelled"); return 0; }
         E.filename = n;
         detect_lang();
     }
-    char *real = realpath(E.filename, NULL), tmp[PATH_MAX + 16];
-    const char *target = real ? real : E.filename;
-    snprintf(tmp, sizeof tmp, "%s.avtty.tmp", target);
-    FILE *f = fopen(tmp, "wb");
+    FILE *f = fopen(E.filename, "wb");
     long total = 0;
-    int ok = 0, e = errno;
-    if (f) {
-        if (!(E.nrows == 1 && !E.row[0].len))
-            for (int i = 0; i < E.nrows; i++) {
-                fwrite(E.row[i].s, 1, E.row[i].len, f);
-                total += E.row[i].len + 1 + E.crlf;
-                if (E.crlf) fputc('\r', f);
-                fputc('\n', f);
-            }
-        ok = fflush(f) == 0 && !ferror(f);
-        e = errno;
-        ok = fclose(f) == 0 && ok;
-        if (ok) {
-            struct stat st;
-            if (stat(target, &st) == 0) chmod(tmp, st.st_mode & 07777);
-            if (rename(tmp, target)) { ok = 0; e = errno; }
+    int bad;
+    if (!f) { set_msg("Can't save: %s", strerror(errno)); return -1; }
+    if (!(E.nrows == 1 && !E.row[0].len))
+        for (int i = 0; i < E.nrows; i++) {
+            fwrite(E.row[i].s, 1, E.row[i].len, f);
+            fputc('\n', f);
+            total += E.row[i].len + 1;
         }
-        if (!ok) unlink(tmp);
-    }
-    free(real);
-    if (!ok) { set_msg("Can't save: %s", strerror(e)); return -1; }
+    bad = ferror(f);
+    bad |= fclose(f) != 0;
+    if (bad) { set_msg("Can't save: %s", strerror(errno)); return -1; }
     E.saved = E.cur;
     recent_add(E.filename);
     set_msg("%ld bytes written to %s", total, E.filename);
     return 0;
+}
+
+static void complete(char **buf, size_t *cap, size_t *len) {
+    glob_t g;
+    char pat[PATH_MAX];
+    snprintf(pat, sizeof pat, "%s*", *buf);
+    prompt_note = "";
+    if (glob(pat, GLOB_MARK | GLOB_TILDE, NULL, &g) == 0) {
+        size_t n = strlen(g.gl_pathv[0]);
+        for (size_t i = 1; i < g.gl_pathc; i++) {
+            size_t k = 0;
+            while (k < n && g.gl_pathv[i][k] == g.gl_pathv[0][k]) k++;
+            n = k;
+        }
+        if (n >= *len) {
+            if (n + 2 > *cap) *buf = xrealloc(*buf, *cap = n + 64);
+            memcpy(*buf, g.gl_pathv[0], n);
+            (*buf)[*len = n] = 0;
+        }
+        if (g.gl_pathc > 1) {
+            static char note[48];
+            snprintf(note, sizeof note, "  (%zu matches)", g.gl_pathc);
+            prompt_note = note;
+        }
+        globfree(&g);
+    }
 }
 
 static char *prompt(const char *label, void (*cb)(const char *, int)) {
@@ -771,7 +696,8 @@ static char *prompt(const char *label, void (*cb)(const char *, int)) {
             if (cb) cb(buf, c);
             if (c == ESC) { free(buf); return NULL; }
             return buf;
-        } else if (c >= 32 && c < 256 && c != 127) {
+        } else if (c == '\t' && prompt_paths) complete(&buf, &cap, &len);
+        else if (c >= 32 && c < 256 && c != 127) {
             if (len + 2 > cap) buf = xrealloc(buf, cap *= 2);
             buf[len++] = (char)c;
             buf[len] = 0;
@@ -780,32 +706,35 @@ static char *prompt(const char *label, void (*cb)(const char *, int)) {
     }
 }
 
+static int search(const char *q, int dir, int incl) {
+    for (int i = 0; i <= E.nrows; i++) {
+        int y = ((E.cy + dir * i) % E.nrows + E.nrows) % E.nrows, lo = 0, hi = E.row[y].len;
+        const char *s = E.row[y].s, *m = NULL;
+        if (i == 0) { if (dir > 0) lo = E.cx + !incl; else hi = E.cx - 1; }
+        if (i == E.nrows) { if (dir > 0) hi = E.cx; else lo = E.cx; }
+        for (const char *p = strstr(s, q); p && p - s <= hi; p = strstr(p + 1, q))
+            if (p - s >= lo) { m = p; if (dir > 0) break; }
+        if (m) { E.cy = y; E.cx = (int)(m - s); return 1; }
+    }
+    return 0;
+}
+
 static void find_cb(const char *q, int key) {
-    static int last = -1, dir = 1;
-    if (key == '\r' || key == ESC) { last = -1; dir = 1; return; }
-    if (key == ARROW_RIGHT || key == ARROW_DOWN) dir = 1;
-    else if (key == ARROW_LEFT || key == ARROW_UP) dir = -1;
-    else { last = -1; dir = 1; }
+    if (key == '\r' || key == ESC) return;
+    int dir = key == ARROW_RIGHT || key == ARROW_DOWN ? 1 : key == ARROW_LEFT || key == ARROW_UP ? -1 : 0;
     prompt_note = "";
     if (!*q) return;
-    int cur = last == -1 ? E.cy - 1 : last;
-    if (last != -1 && dir == 1 && E.cx < E.row[cur].len) {
-        char *m = strstr(E.row[cur].s + E.cx + 1, q);
-        if (m) { E.cx = (int)(m - E.row[cur].s); return; }
-    }
-    for (int i = 0; i < E.nrows; i++) {
-        cur = (cur + dir + E.nrows) % E.nrows;
-        char *m = strstr(E.row[cur].s, q);
-        if (m) { last = E.cy = cur; E.cx = (int)(m - E.row[cur].s); return; }
-    }
-    prompt_note = "  [not found]";
+    if (!dir) { E.cx = find_x; E.cy = find_y; }
+    if (!search(q, dir ? dir : 1, !dir)) prompt_note = "  [not found]";
 }
 
 static void find(void) {
-    int cx = E.cx, cy = E.cy, ro = E.rowoff, co = E.coloff;
+    int ro = E.rowoff, co = E.coloff;
+    find_x = E.cx;
+    find_y = E.cy;
     char *q = prompt("Find (Esc cancel, arrows next/prev): ", find_cb);
-    if (q) free(q);
-    else { E.cx = cx; E.cy = cy; E.rowoff = ro; E.coloff = co; }
+    if (q) { free(E.lastq); E.lastq = q; }
+    else { E.cx = find_x; E.cy = find_y; E.rowoff = ro; E.coloff = co; }
 }
 
 static void goto_line(void) {
@@ -845,11 +774,11 @@ static void replace_all(void) {
     free(t);
 }
 
-static void open_path(const char *label, int mode) {
-    char err[256], *p = prompt(label, NULL);
-    if (!p) return;
+static void open_prompt(const char *label, int mode) {
+    char err[256], *q, *p = ask_path(label);
     const char *h = getenv("HOME");
-    char *q = xrealloc(NULL, strlen(p) + (h ? strlen(h) : 0) + 1);
+    if (!p) return;
+    q = xrealloc(NULL, strlen(p) + (h ? strlen(h) : 0) + 1);
     if (p[0] == '~' && (p[1] == '/' || !p[1]) && h) sprintf(q, "%s%s", h, p + 1);
     else strcpy(q, p);
     if (open_file_cmd(q, mode, err, sizeof err)) set_msg("%s", err);
@@ -857,14 +786,9 @@ static void open_path(const char *label, int mode) {
     free(p);
 }
 
-static void open_recent(int i) {
-    char err[256];
-    if (open_file_cmd(E.recent[i], 1, err, sizeof err)) set_msg("%s", err);
-}
-
 static void dash_activate(int i) {
     switch (i) {
-    case 0: open_path("Open file: ", 0); break;
+    case 0: open_prompt("Open file: ", 0); break;
     case 1:
         free_rows();
         insert_row(0, "", 0);
@@ -873,16 +797,15 @@ static void dash_activate(int i) {
         E.lang = E.cx = E.cy = E.dash = 0;
         set_msg("New buffer - Ctrl-S to name and save it");
         break;
-    case 2: open_path("Create file: ", 2); break;
+    case 2: open_prompt("Create file: ", 2); break;
     case 3:
         for (int k = 0; k < E.nrecent; k++) free(E.recent[k]);
-        E.nrecent = recent_read(E.recent, RECENT_MAX);
+        E.nrecent = recent_read(E.recent, MAXREC);
         E.rsel = 0;
         E.page = 1;
         break;
     case 4: E.page = 2; break;
-    case 5: E.nums = !E.nums; break;
-    case 6: exit(0);
+    case 5: exit(0);
     }
 }
 
@@ -892,21 +815,33 @@ static void dash_key(int c) {
         if (c == ARROW_UP && E.nrecent) E.rsel = (E.rsel + E.nrecent - 1) % E.nrecent;
         else if (c == ARROW_DOWN && E.nrecent) E.rsel = (E.rsel + 1) % E.nrecent;
         else if (c == ESC || c == ARROW_LEFT || c == BACKSPACE || c == 'q') E.page = 0;
-        else if (c == '\r' && E.nrecent) open_recent(E.rsel);
-        else if (c >= '1' && c <= '8' && c - '1' < E.nrecent) open_recent(c - '1');
+        else if (c == '\r' || (c >= '1' && c <= '8')) {
+            char err[256];
+            int i = c == '\r' ? E.rsel : c - '1';
+            if (i < E.nrecent && open_file_cmd(E.recent[i], 1, err, sizeof err)) set_msg("%s", err);
+        }
         return;
     }
-    int col = E.sel / 4, row = E.sel % 4, sz = col ? NITEMS - 4 : 4;
-    if (c == ARROW_UP) E.sel = E.twocol ? col * 4 + (row + sz - 1) % sz : (E.sel + NITEMS - 1) % NITEMS;
-    else if (c == ARROW_DOWN) E.sel = E.twocol ? col * 4 + (row + 1) % sz : (E.sel + 1) % NITEMS;
-    else if ((c == ARROW_LEFT || c == ARROW_RIGHT) && E.twocol) {
-        int nsz = col ? 4 : NITEMS - 4;
-        E.sel = (1 - col) * 4 + (row < nsz ? row : nsz - 1);
-    } else if (c == '\r') dash_activate(E.sel);
+    int col = E.sel / 3, row = E.sel % 3;
+    if (c == ARROW_UP) E.sel = E.twocol ? col * 3 + (row + 2) % 3 : (E.sel + 5) % 6;
+    else if (c == ARROW_DOWN) E.sel = E.twocol ? col * 3 + (row + 1) % 3 : (E.sel + 1) % 6;
+    else if ((c == ARROW_LEFT || c == ARROW_RIGHT) && E.twocol) E.sel = (E.sel + 3) % 6;
+    else if (c == '\r') dash_activate(E.sel);
     else if (c == CTRL_('q')) exit(0);
     else if (c > 32 && c < 127)
-        for (int i = 0; i < NITEMS; i++)
+        for (int i = 0; i < 6; i++)
             if (items[i].key == tolower(c)) { E.sel = i; dash_activate(i); return; }
+}
+
+static void ins_line(int y, const char *s) {
+    char *c = strdup(s);
+    int cx = E.cx;
+    E.group++;
+    do_op(SPLIT, y, 0, 0);
+    for (int k = 0; c[k]; k++) do_op(INS, y, k, c[k]);
+    free(c);
+    E.cy = y + 1;
+    E.cx = cx < E.row[E.cy].len ? cx : E.row[E.cy].len;
 }
 
 static void newline(void) {
@@ -939,6 +874,8 @@ static void delete_forward(void) {
 
 static void cut_line(void) {
     int y = E.cy;
+    free(E.clip);
+    E.clip = strndup(E.row[y].s, E.row[y].len);
     for (int x = E.row[y].len; x > 0; x--) do_op(DEL, y, x - 1, E.row[y].s[x - 1]);
     if (y + 1 < E.nrows) do_op(JOIN, y, 0, 0);
     else if (y > 0) do_op(JOIN, y - 1, E.row[y - 1].len, 0);
@@ -960,6 +897,38 @@ static void word_move(int dir) {
     }
 }
 
+static void word_delete(void) {
+    int to = E.cx;
+    if (!to) return;
+    word_move(-1);
+    int from = E.cx;
+    E.cx = to;
+    E.group++;
+    while (E.cx > from) backspace();
+}
+
+static void match_bracket(void) {
+    static const char b[] = "([{)]}";
+    char ch = E.cx < E.row[E.cy].len ? E.row[E.cy].s[E.cx] : 0, *p = ch ? strchr(b, ch) : NULL;
+    if (!p) { set_msg("Not on a bracket"); return; }
+    int y = E.cy, x = E.cx, d = 0, i = (int)(p - b), dir = i < 3 ? 1 : -1;
+    char match = b[(i + 3) % 6];
+    for (;;) {
+        x += dir;
+        while (x < 0 || x >= E.row[y].len) {
+            y += dir;
+            if (y < 0 || y >= E.nrows) { set_msg("No matching bracket"); return; }
+            x = dir > 0 ? 0 : E.row[y].len - 1;
+        }
+        char k = E.row[y].s[x];
+        if (k == ch) d++;
+        else if (k == match) {
+            if (!d) { E.cy = y; E.cx = x; return; }
+            d--;
+        }
+    }
+}
+
 static void process_key(int c) {
     static int quit_pending = 0;
     int was_pending = quit_pending, vertical = 0, typed = 0;
@@ -975,14 +944,28 @@ static void process_key(int c) {
         }
         exit(0);
     case CTRL_('s'): save_file(); break;
+    case CTRL_('o'):
+        if (is_dirty()) set_msg("Unsaved changes - save first (Ctrl-S)");
+        else open_prompt("Open file: ", 0);
+        break;
     case CTRL_('z'): undo(); break;
     case CTRL_('y'): redo(); break;
     case CTRL_('f'): find(); break;
     case CTRL_('r'): replace_all(); break;
     case CTRL_('g'): goto_line(); break;
     case CTRL_('k'): E.group++; cut_line(); break;
+    case CTRL_('d'): ins_line(E.cy, E.row[E.cy].s); break;
+    case CTRL_('u'):
+        if (E.clip) ins_line(E.cy, E.clip);
+        else set_msg("Nothing to paste (cut a line with Ctrl-K first)");
+        break;
+    case CTRL_('w'): word_delete(); break;
+    case CTRL_('b'): match_bracket(); break;
     case CTRL_('n'): E.nums = !E.nums; break;
-    case CTRL_('c'): set_msg("Ctrl-Q quits avtty"); break;
+    case ALT('n'): case ALT('p'):
+        if (!E.lastq) set_msg("No previous search (Ctrl-F)");
+        else if (!search(E.lastq, c == ALT('n') ? 1 : -1, 0)) set_msg("'%.40s' not found", E.lastq);
+        break;
     case BACKSPACE: case CTRL_('h'): E.group++; backspace(); break;
     case DEL_KEY: E.group++; delete_forward(); break;
     case ARROW_LEFT:
@@ -1015,38 +998,47 @@ static void process_key(int c) {
 }
 
 static void usage(void) {
-    puts("avtty " VERSION " - a very tiny text yard\n\n"
-         "  avtty             start screen\n"
-         "  avtty <file>      open <file> (new buffer if it doesn't exist)\n"
-         "  avtty -o <file>   open an existing file\n"
-         "  avtty -c <file>   create a new file\n"
-         "  avtty -n          start with line numbers on\n"
-         "  avtty -h | -v     help | version");
+    puts("avtty " VERSION " - a very tiny text yard\n"
+         "Part of the Texivi Software Suite (TSS)\n\n"
+         "usage: avtty [+line] [file]   open file (new buffer if it doesn't exist)\n"
+         "       avtty -o file          open an existing file\n"
+         "       avtty -c file          create a new file\n"
+         "       cmd | avtty            edit piped text, then save it with Ctrl-S\n"
+         "       avtty -h | -v          help | version");
 }
 
 int main(int argc, char **argv) {
     const char *file = NULL;
-    int mode = 0;
+    int mode = 0, line = 0, piped = 0;
     char err[256];
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a, "-h")) { usage(); return 0; }
-        if (!strcmp(a, "-v")) { puts("avtty " VERSION); return 0; }
-        if (!strcmp(a, "-n")) { E.nums = 1; continue; }
-        if ((!strcmp(a, "-c") || !strcmp(a, "-o")) && i + 1 < argc && !file) {
+        if (!strcmp(a, "-v")) { puts("avtty " VERSION " - Texivi Software Suite (TSS)"); return 0; }
+        if (a[0] == '+' && isdigit((unsigned char)a[1])) line = atoi(a + 1);
+        else if ((!strcmp(a, "-c") || !strcmp(a, "-o")) && i + 1 < argc && !file) {
             mode = a[1] == 'c' ? 2 : 1;
             file = argv[++i];
         } else if (a[0] != '-' && !file) file = a;
         else { fprintf(stderr, "avtty: bad argument '%s' (try -h)\n", a); return 1; }
     }
-    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
-        fputs("avtty: needs an interactive terminal\n", stderr);
-        return 1;
+    if (!isatty(STDIN_FILENO)) {
+        if (!file) { load_stream(stdin); piped = 1; }
+        int t = open("/dev/tty", O_RDWR);
+        if (t < 0 || dup2(t, STDIN_FILENO) < 0) { fputs("avtty: no terminal available\n", stderr); return 1; }
+        close(t);
     }
+    if (!isatty(STDOUT_FILENO)) { fputs("avtty: stdout is not a terminal\n", stderr); return 1; }
+
     E.promptcol = -1;
-    if (!file) E.dash = 1;
-    else if (open_file_cmd(file, mode, err, sizeof err)) { fprintf(stderr, "avtty: %s\n", err); return 1; }
+    if (file) {
+        if (open_file_cmd(file, mode, err, sizeof err)) { fprintf(stderr, "avtty: %s\n", err); return 1; }
+    } else if (piped) {
+        if (!E.nrows) insert_row(0, "", 0);
+        set_msg("Read from stdin - Ctrl-S to save it somewhere");
+    } else E.dash = 1;
+    if (line && !E.dash) E.cy = line > E.nrows ? E.nrows - 1 : line - 1;
 
     enable_raw();
     refresh_screen();
