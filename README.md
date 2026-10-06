@@ -10,7 +10,7 @@ It is part of the [texivi software suite](tss.md)
 
 The project is focused on keeping the source small and minimal while not compromising on **any** feature of a standard text editor
 
-The entire editor is ***under 1000*** *LOC* and is under **40 kilobytes**
+The entire editor is ***under 1400*** *LOC* and is under **55 kilobytes**
 
 It is aimed at people who prefer minimal software. Its small size makes it perfect for minimal systems.
 
