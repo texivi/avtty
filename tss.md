@@ -1,20 +1,26 @@
 # Texivi Software Suite (TSS)
 
-The **Texivi Software Suite (TSS)** is a collection of small Unix utilities built around the **Unix philosophy**:
+TSS is a set of small Unix tools that do their job and stay out of your way.
 
-> *"Write programs that do one thing and do it well."*
+> *"Write programs that do one thing and do it well."*  
+> — **The Unix Philosophy**
 
-Not only that, but all TSS programs follow the Texivi software philosophy (TSP)
+---
 
-> *"Minimalism is not about lines of code, it is about the **LOC** to feature ratio*" 
+## Texivi Software Philosophy (TSP)
 
-## Core Rules
+> *"Minimalism isn't about writing the fewest lines of code. It's about getting the most features out of the code you write."*
 
-* **Single File:** Every tool in the suite is built as a single code file.
-* **KISS:** Programs are kept small by removing extra features and keeping only what is necessary.
-* **One Purpose:** Each tool is built to handle one specific task.
-* **Work Together:** Every program easily integrates with standard command-line tools and shell scripts.
-* **Low Resource Use:** Designed to run fast and use minimal memory.
+
+If you write a line of code, it has to be useful
+---
+
+## Guidelines
+
+- **One Source File:** Keep the whole program in one file. It makes code easy to find, read, and build.
+- **Pack Each Line:** Make every line count. Avoid extra libraries and layers that don't add value.
+- **Use Standards:** Stick to standard system calls so your code works anywhere without breaking.
+- **Keep Building Simple:** Compiling your code should be one command, not a puzzle.
 
 ---
 
