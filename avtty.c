@@ -380,7 +380,7 @@ static void set_msg(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(E.msg, sizeof E.msg, fmt, ap);
-    va_end(ap):
+    va_end(ap);
 
     E.sticky = strcasestr(E.msg, "unsaved") || strcasestr(E.msg, "couldn't") || strcasestr(E.msg, "can't") ||
                strcasestr(E.msg, "bigger window") || strcasestr(E.msg, "replace?") || strcasestr(E.msg, "save first");
