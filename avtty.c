@@ -27,8 +27,6 @@
 
 #define SGR(s) "\x1b[" s "m"
 #define RESET SGR("0")
-/* every colour below is one of the terminal's own 16 ANSI colours, so the user's theme drives it;
-   the few backgrounds that need to differ subtly from the page are derived from the theme at startup */
 #define GRAY SGR("90")
 #define TXT SGR("39")
 #define TITLE SGR("1;36")
@@ -93,13 +91,13 @@ static void (*overlay)(struct abuf *);
 static int ov_r, ov_c, mb_y = -1, mb_x = -1, use_icons = 1, use_mouse = 1, mx_, my_, greet = 1, mas_vis, mon;
 
 static const struct { const char *label; char key; const char *hint; } items[8] = {
-    { "Open File", 'o', "open an existing file - tab to complete" },
-    { "Find File", 'f', "fuzzy-find any file in this folder (Ctrl-P)" },
+    { "Open File", 'o', "open an existing file" },
+    { "Find File", 'f', "find any file in this directory (Ctrl-P)" },
     { "Find Text", 't', "search inside any file (Alt-F)" },
     { "Create File", 'c', "start a brand new file right now" },
-    { "Scratch Buffer", 's', "a blank page - nothing is saved until you say so" },
+    { "Scratch Buffer", 's', "blank page" },
     { "Recent Files", 'r', "jump back in right where you left off" },
-    { "Keys & Help", 'h', "every shortcut, neatly grouped (or just ask me)" },
+    { "Keys & Help", 'h', "all kiybinds here. or just ask me" },
     { "Quit", 'q', "see you next time!" }
 };
 
@@ -187,8 +185,6 @@ static void bgsgr(char *o, size_t n, int r, int g, int b) {
         snprintf(o, n, "\x1b[48;5;%dm", 232 + (k < 0 ? 0 : k > 23 ? 23 : k));
     } else snprintf(o, n, "\x1b[48;5;%dm", 16 + 36 * ((r * 5 + 127) / 255) + 6 * ((g * 5 + 127) / 255) + (b * 5 + 127) / 255);
 }
-
-/* ask the terminal for its background/foreground (OSC 11/10, DA1 as end marker) and derive the few shades we need */
 static void theme_init(void) {
     char buf[512], bs[40], sb[40], cb[40], bb[40], *p;
     int n = 0, bg[3], fg[3], hb = 0, hf = 0, tries = 0, dk;
@@ -293,8 +289,6 @@ static int read_key(void) {
         if (!strcmp(q, esc[i].s)) return esc[i].k;
     return q[1] == '?' || q[1] == '>' ? 0 : ESC;
 }
-
-/* block until a key arrives; returns 0 only if the terminal was resized, so callers redraw on demand, not on a timer */
 static int wait_key(void) {
     int rs = E.srows, cs = E.scols, c;
     while (!(c = read_key())) {
@@ -375,7 +369,7 @@ static void do_op(OpType t, int y, int x, char c) {
 
 static int is_dirty(void) { return E.cur != E.saved; }
 
-static int toast_ms = 1000;   /* how long avtta / messages stay up; AVTTY_TOAST_MS overrides */
+static int toast_ms = 3000;  
 static long long now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -386,8 +380,8 @@ static void set_msg(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(E.msg, sizeof E.msg, fmt, ap);
-    va_end(ap);
-    /* errors and anything that waits on you stay until your next key; plain confirmations ("saved") vanish fast */
+    va_end(ap):
+
     E.sticky = strcasestr(E.msg, "unsaved") || strcasestr(E.msg, "couldn't") || strcasestr(E.msg, "can't") ||
                strcasestr(E.msg, "bigger window") || strcasestr(E.msg, "replace?") || strcasestr(E.msg, "save first");
     E.msgtime = now_ms() + (E.sticky ? 3600000 : 0);
@@ -601,8 +595,6 @@ static int row_lead(int y) {
     while (i < r->len && (r->s[i] == ' ' || r->s[i] == '\t')) i++;
     return i == r->len ? -1 : cx_to_rx(r, i);
 }
-
-/* columns of indent guides to draw on row y; blank rows borrow from the nearest code above and below */
 static int guide_w(int y) {
     int a = row_lead(y), up = -1, dn = -1;
     if (a >= 0) return a;
@@ -745,9 +737,6 @@ static void box(struct abuf *ab, int r, int c, int g) {
     }
     ab_s(ab, RESET);
 }
-
-
-/* ---- avtta (a very tiny text assistant): 12x8 pixels drawn with half blocks, colours come from the terminal theme ---- */
 #define CY "\001"
 #define OR "\002"
 enum { P_IDLE, P_WAVE, P_HAPPY, P_CHEER, P_WORRY, P_CONFUSED, P_SEARCH, P_READ, P_THINK, P_IDEA, P_PEN, P_SLEEP, P_LOOK_UP, P_SHY, P_SAD };
@@ -769,9 +758,6 @@ static const char *const spr[NPOSE][10] = {
     { "................", "...LLLLLLLLLL...", "...BBBBBBBBBB...", "...BBBBBBBBBB...", "...BEKBBEKBBB...", "...BKKBBKKBBB...", "...BQKBBMKBQB...", "...BQBBBBBBQB...", "...DDDDDDDDDD...", "....DD....DD...." },
     { "................", "...LLLLLLLLLL...", "...BBKBBBBKBB...", "...BBEKBBEKBB...", "...BBKKBBKKBB...", "...BBKKBBKKBB...", "...BBCBMMBBBB...", "...BBBMBBMBBB...", "...DDDDDDDDDD...", "....DD....DD...." },
 };
-
-/* body uses the terminal's own blues so it follows the theme; face and props use fixed 256-colour codes (1000+n),
-   because themes remap ANSI black/white and the eyes would vanish */
 static int pcode(char c) {
     switch (c) {
     case 'B': return 94; case 'D': return 34; case 'L': return 96;
@@ -805,8 +791,6 @@ static void mascot_draw(struct abuf *ab, int r, int c, int pose) {
         ab_s(ab, RESET " ");
     }
 }
-
-/* one bubble line; \001 toggles cyan, \002 toggles orange */
 static void bline(struct abuf *ab, const char *s, int w) {
     int col = 0, st = 0;
     ab_s(ab, TXT);
@@ -863,8 +847,6 @@ static int wrap_into(const char *s, int w, char out[4][220]) {
     }
     return nl;
 }
-
-/* avtta bottom-left, speech bubble to its right; base is the last row it uses. full = bubble spans the screen */
 static void panel(struct abuf *ab, int base, int pose, const char *text, int full) {
     char ln[4][220];
     int bx = 21, mw = E.scols - bx, nl = wrap_into(text, mw - 4, ln), bw = 16, top;
@@ -890,8 +872,6 @@ static void panel(struct abuf *ab, int base, int pose, const char *text, int ful
     put(ab, base - 1, bx - 1, GRAY, "◀");
     ab_s(ab, RESET);
 }
-
-/* which pose fits what avtta is saying */
 static int msg_pose(const char *m) {
     if (strcasestr(m, "couldn't save")) return P_SAD;
     if (strcasestr(m, "find") && (strcasestr(m, "couldn't") || strcasestr(m, "can't") || strcasestr(m, "don't"))) return P_CONFUSED;
@@ -909,7 +889,6 @@ static int msg_pose(const char *m) {
 
 static const signed char ipose[8] = { P_LOOK_UP, P_SEARCH, P_SEARCH, P_PEN, P_THINK, P_READ, P_READ, P_SLEEP };
 
-/* two fixed columns of boxes; on narrow terminals one column that scrolls */
 static const signed char kc2[2][3] = { { 0, 1, 2 }, { 3, 4, 5 } }, kc3[3][3] = { { 0, 3, -1 }, { 1, 2, -1 }, { 4, 5, -1 } };
 
 static void dash_draw(struct abuf *ab) {
@@ -1121,8 +1100,6 @@ static void hint_bar(struct abuf *ab, const struct kd *h, int n) {
 
 static int *bs;
 static int bscap;
-
-/* in the editor avtta only shows up for the big moments: saving, quitting, errors; copy/cut/jump/etc just get a plain line */
 static int avtta_worthy(void) {
     return E.sticky || strcasestr(E.msg, "saved") || strcasestr(E.msg, "new file") ||
            strcasestr(E.msg, "scratch") || strcasestr(E.msg, "stdin");
@@ -1169,7 +1146,6 @@ static void refresh_screen(void) {
             ccol = E.rx - E.coloff;
         }
         if (E.lang == 1) {
-            /* bs[i] = block-comment state at the start of row i, valid for i <= hl_from */
             int i, b;
             if (E.nrows + 2 > bscap) { bscap = E.nrows * 2 + 16; bs = xrealloc(bs, sizeof *bs * bscap); }
             bs[0] = 0;
@@ -1404,8 +1380,6 @@ static int save_direct(const char *path, long *total) {
     bad |= fclose(f) != 0;
     return bad ? -1 : 0;
 }
-
-/* write to a temp file next to the target, fsync, rename over it: a crash or full disk can't eat the original */
 static int save_atomic(const char *path, long *total) {
     struct stat st, ls;
     char real[PATH_MAX], tmp[PATH_MAX * 2 + 32], dir[PATH_MAX];
@@ -1692,8 +1666,6 @@ static void ff_filter(void) {
     qsort(ff_res, ff_nres, sizeof *ff_res, ff_cmp);
     ff_sel = ff_top = 0;
 }
-
-/* Find Text: every file was read once up front, each keystroke just rescans the buffers */
 static void tx_filter(void) {
     for (int i = 0; i < ntr; i++) free(tr[i].snip);
     ntr = ff_nres = ff_sel = ff_top = 0;
@@ -1964,8 +1936,6 @@ static void pick_text_open(void) {
     free(q);
     free(p);
 }
-
-/* ---- ask avtta: plain-words search through every shortcut ---- */
 static const struct { const char *a, *b; } syn[] = {
     { "exit", "quit" }, { "close", "quit" }, { "leave", "quit" }, { "yank", "copy" }, { "put", "paste" }, { "delete", "cut" },
     { "remove", "cut" }, { "search", "find" }, { "seek", "find" }, { "goto", "go to" }, { "jump", "go to" }, { "rename", "save" },
@@ -2055,8 +2025,6 @@ static void ask_modal(void) {
     }
     overlay = NULL;
 }
-
-/* returns 1 to quit, 0 to keep editing, -1 if there is no room for the dialog */
 static int quit_dialog(void) {
     const char *nm = E.filename ? E.filename : "this buffer";
     if (!mas_room()) return -1;
