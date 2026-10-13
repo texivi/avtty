@@ -6,7 +6,7 @@
 
 *A Very Tiny Text Yard*
 
-AVTTY is a small, radical and experimental, friendly text editor for the terminal, written in C.
+AVTTY is a small, radical and experimental, friendly text editor, written in C.
 
 It is part of the [texivi software suite](tss.md)
 
@@ -16,7 +16,7 @@ It is part of the [texivi software suite](tss.md)
 
 ## Meet avtta
 
-AVTTY comes with a tiny helper, **avtta** (*a very tiny text assistant*). It stays out of your way and only pops up when it matters.
+AVTTY comes with a tiny helper, **avtta** (*a very tiny text assistant*). It stays out of your way and only pops up when it matters. 
 
 <p align="center">
   <img src="images/01-start.png" alt="The start screen, with avtta saying hi" width="720">
@@ -26,25 +26,20 @@ AVTTY comes with a tiny helper, **avtta** (*a very tiny text assistant*). It sta
   <img src="images/avtta-poses-dark.png" alt="All of avtta's poses" width="720">
 </p>
 
-## Make a file and save it
-
-Pick **Create File** on the start screen, or press `c`, and type a name.
-
 <p align="center">
   <img src="images/02-create-file.png" alt="Typing a file name" width="355">
   <img src="images/03-new-file.png" alt="A fresh empty file" width="355">
 </p>
 
-Start typing. Code gets syntax colors, auto-pairs and smart indent. Press `Ctrl-S` to save.
+
+## syntax
+
+Avtty has syntax highlighting and smart indents!
 
 <p align="center">
   <img src="images/04-typing.png" alt="Typing some C" width="355">
   <img src="images/05-saved.png" alt="avtta cheering after a save" width="355">
 </p>
-
-## Quit without saving
-
-Changed something and hit `Ctrl-Q`? avtta stops you before you lose it: save and quit, discard and quit, or keep editing.
 
 <p align="center">
   <img src="images/07-quit-unsaved.png" alt="avtta worried about unsaved changes" width="355">
@@ -64,14 +59,12 @@ Changed something and hit `Ctrl-Q`? avtta stops you before you lose it: save and
 
 ## Ask avtta
 
-Forgot a shortcut? Press `F1` in the editor (or `/` on the start screen) and ask in plain words: *"undo"*, *"jump to a line"*, *"save"*. avtta finds the shortcut for you.
+Forgot a shortcut? Press `F1` in the editor (or `/` on the start screen) and ask: *"undo"*, *"jump to a line"*, *"save"*. avtta finds the shortcut for you.
 
 <p align="center">
   <img src="images/11-ask.png" alt="Asking avtta about undo" width="355">
   <img src="images/12-ask-not-found.png" alt="avtta when it doesn't know" width="355">
 </p>
-
-Every shortcut also fits on one screen. Press `h` on the start screen.
 
 <p align="center">
   <img src="images/13-keys.png" alt="All the keys" width="720">
